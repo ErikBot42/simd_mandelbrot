@@ -1,8 +1,18 @@
+cargo-features = ["profile-rustflags"]
+
+
 [package]
 name = "cpu_mandelbrot"
 version = "0.1.0"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+
+[profile.release]
+rustflags = [
+    "-C", "target-cpu=native",
+]
+
 
 [dependencies]

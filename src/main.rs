@@ -16,53 +16,52 @@
 use core::arch::x86_64::*;
 use std::hint::black_box;
 
-#[inline(never)]
-pub unsafe fn mandel_simd(cx: __m256, cy: __m256, i: usize) -> u8 {
-    //(__m256, __m256) {
+use std::time::Instant;
+
+macro_rules! fmadd {
+    ($a:expr, $b:expr, $c:expr) => {
+        unsafe { _mm256_fmadd_ps($a, $b, $c) }
+    };
+}
+macro_rules! fmsub {
+    ($a:expr, $b:expr, $c:expr) => {
+        unsafe { _mm256_fmsub_ps($a, $b, $c) }
+    };
+}
+macro_rules! mul {
+    ($a:expr, $b:expr) => {
+        unsafe { _mm256_mul_ps($a, $b) }
+    };
+}
+macro_rules! add {
+    ($a:expr, $b:expr) => {
+        unsafe { _mm256_add_ps($a, $b) }
+    };
+}
+macro_rules! splat {
+    ($a:expr) => {
+        unsafe { _mm256_set1_ps($a) }
+    };
+}
+macro_rules! splat {
+    ($a:expr) => {
+        unsafe { _mm256_set1_ps($a) }
+    };
+}
+macro_rules! mandel_cmp {
+    ($x:expr, $y:expr) => {
+        unsafe {
+            _mm256_movemask_ps(_mm256_cmp_ps::<1>(
+                fmadd!($x, $x, mul!($y, $y)),
+                splat!(4.0),
+            )) as u8
+        }
+    };
+}
+
+#[inline(always)]
+pub unsafe fn mandel_simd(cx: __m256, cy: __m256) -> u8 {
     let i = 8;
-
-    //let (cx0, cx1) = black_box((cx, cx));
-    //let (cy0, cy1) = black_box((cy, cy));
-
-    macro_rules! fmadd {
-        ($a:expr, $b:expr, $c:expr) => {
-            unsafe { _mm256_fmadd_ps($a, $b, $c) }
-        };
-    }
-    macro_rules! fmsub {
-        ($a:expr, $b:expr, $c:expr) => {
-            unsafe { _mm256_fmsub_ps($a, $b, $c) }
-        };
-    }
-    macro_rules! mul {
-        ($a:expr, $b:expr) => {
-            unsafe { _mm256_mul_ps($a, $b) }
-        };
-    }
-    macro_rules! add {
-        ($a:expr, $b:expr) => {
-            unsafe { _mm256_add_ps($a, $b) }
-        };
-    }
-    macro_rules! splat {
-        ($a:expr) => {
-            unsafe { _mm256_set1_ps($a) }
-        };
-    }
-    macro_rules! mandel_iter {
-        ($cx:expr, $cy:expr) => {{
-            let mut x = $cx;
-            let mut y = $cy;
-            for _ in 0..i {
-                // x = x * x - y * y + cx
-                // y = 2.0 * x * y + cy)
-                let xy = mul!(x, y);
-                x = add!(fmsub!(x, x, mul!(y, y)), $cx);
-                y = fmadd!(xy, splat!(2.0), $cy);
-            }
-            fmadd!(x, x, mul!(y, y))
-        }};
-    }
 
     let mut x = cx;
     let mut y = cy;
@@ -74,9 +73,7 @@ pub unsafe fn mandel_simd(cx: __m256, cy: __m256, i: usize) -> u8 {
         y = fmadd!(xy, splat!(2.0), cy);
     }
     // in_set = x * x + y * y < 4.0
-    let mask = _mm256_cmp_ps::<1>(fmadd!(x, x, mul!(y, y)), splat!(4.0));
-    let b = _mm256_movemask_ps(mask) as u8;
-    b
+    mandel_cmp!(x, y)
 }
 
 fn mandel((x, y): (f32, f32), (cx, cy): (f32, f32)) -> (f32, f32) {
@@ -88,37 +85,76 @@ fn mandel_i(c: (f32, f32), i: usize) -> bool {
     for a in 0..i {
         p = mandel(p, c);
     }
-    return (p.0 * p.0 + p.1 * p.1 < 4.0); // treat NaN as inf
+    return p.0 * p.0 + p.1 * p.1 < 4.0; // treat NaN as inf
 }
 
 fn main() {
-    let a = unsafe { _mm256_set_ps(0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8) };
-    let b = unsafe { _mm256_set_ps(0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5) };
-    dbg!(a);
-    dbg!(b);
+    let fac = 1;
 
-    let iterations = 10;
+    let width = 128 * fac;
+    let height = 64 * fac;
 
-    let a = unsafe { mandel_simd(black_box(a), black_box(b), black_box(iterations)) };
-    dbg!(a);
+    let wdiff = 1.0 / width as f32 * 2.0;
 
-    //println!("Hello, world!");
+    let woffsets = unsafe {
+        _mm256_set_ps(
+            0.0 * wdiff,
+            1.0 * wdiff,
+            2.0 * wdiff,
+            3.0 * wdiff,
+            4.0 * wdiff,
+            5.0 * wdiff,
+            6.0 * wdiff,
+            7.0 * wdiff,
+        )
+    };
 
-    let width = 80 / 8;
-    let height = 40;
+    let m_iters = width * height;
 
+    let mut data = vec![0; m_iters / 8]; //Vec::with_capacity(m_iters / 8);
+
+    //let mut index = 0;
+
+    let mut data_ptr = data.as_mut_ptr();
+
+    let t = Instant::now();
     for y in 0..height {
-        for x in 0..width {
-            let v = y;
-
-            let uv = (
-                x as f32 / width as f32 * 2.0 - 1.0,
-                y as f32 / height as f32 * 2.0 - 1.0,
+        for x in (0..(width / 8)).map(|x| x * 8) {
+            let u = add!(
+                add!(splat!(x as f32 / width as f32 * 2.0), woffsets),
+                splat!(-1.0)
             );
-            print!("{:}", if mandel_i(uv, 9) { "X" } else { " " });
+            let v = splat!(y as f32 / height as f32 * 2.0 - 1.0);
+
+            let s = unsafe { mandel_simd(u, v) };
+
+            //data[index] = s;
+            //index += 1;
+            unsafe {
+                *data_ptr = s;
+            }
+            unsafe {
+                data_ptr = data_ptr.offset(1);
+            }
+        }
+    }
+    let t = t.elapsed();
+
+    let mut data = data.iter();
+    for _ in 0..height {
+        for _ in (0..(width / 8)).map(|x| x * 8) {
+            let s = data.next().unwrap();
+            print!("{s:08b}");
         }
         println!();
     }
+
+    black_box(data);
+    let secs = t.as_secs_f64();
+    let nanos = t.as_secs_f64() * 1_000_000_000.0;
+    println!("elapsed: {:?} s", secs);
+    println!("elapsed/pixel: {:?} ns", nanos / m_iters as f64);
+    println!("elapsed/group: {:?} ns", nanos / (m_iters / 8) as f64);
 
     //let width = 80;
     //let height = 40;
