@@ -12,6 +12,7 @@ edition = "2021"
 [profile.release]
 rustflags = [
     "-C", "target-cpu=native",
+    "-C", "inline-threshold=10000",
 ]
 
 
